@@ -109,8 +109,9 @@
 
 
 
+import json
 import redis
-from fastapi import FastAPI, Depends
+from fastapi import FastAPI, Depends, HTTPException
 from sqlalchemy import create_engine, Column, Integer, String, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
@@ -127,7 +128,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
 # Redis connection
-redis_client = redis.Redis(host='localhost', port=6380, db=0, decode_responses=True)
+redis_client = redis.Redis(host='localhost', port=6379, db=0, decode_responses=True)
 
 # Define the Item model for the database
 class ItemInDB(Base):
@@ -196,20 +197,24 @@ def read_items(skip: int = 0, limit: int = 10, db: Session = Depends(get_db)):
 
 @app.post("/items/")
 def create_item(item: Item, db: Session = Depends(get_db)):
+    # Create a new item in the database
     db_item = ItemInDB(**item.dict())
     db.add(db_item)
     db.commit()
     db.refresh(db_item)
 
-    # Cache the newly created item in Redis
-    redis_client.set(f"item:{db_item.id}", db_item.json())
-    return {"item_id": db_item.id, "item": db_item}
+    # Serialize and store the newly created item in Redis
+    serialized_item = jsonable_encoder(db_item)  # Convert SQLAlchemy object to a JSON-serializable dict
+    redis_client.set(f"item:{db_item.id}", json.dumps(serialized_item))  # Store as a JSON string
+
+    return {"item_id": db_item.id, "item": serialized_item}
+from fastapi.encoders import jsonable_encoder
 
 @app.patch("/items/{item_id}")
 def update_item(item_id: int, item: ItemUpdate, db: Session = Depends(get_db)):
     db_item = db.query(ItemInDB).filter(ItemInDB.id == item_id).first()
     if not db_item:
-        return {"message": "Item not found"}
+        raise HTTPException(status_code=404, detail="Item not found")
 
     # Update fields dynamically
     update_data = item.dict(exclude_unset=True)
@@ -219,6 +224,22 @@ def update_item(item_id: int, item: ItemUpdate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(db_item)
 
-    # Update cache in Redis
-    redis_client.set(f"item:{db_item.id}", db_item.json())
-    return {"item_id": db_item.id, "updated_item": db_item}
+    # Serialize and store in Redis
+    serialized_item = jsonable_encoder(db_item)  # Converts to a JSON-serializable format
+    redis_client.set(f"item:{db_item.id}", json.dumps(serialized_item))  # Store as JSON string
+
+    return {"item_id": db_item.id, "updated_item": serialized_item}
+
+
+# to check redis is connteced or not 
+
+@app.get("/redis-health")
+def redis_health():
+    try:
+        # Test Redis connection with a PING
+        redis_client.ping()
+        return {"status": "Redis is connected!"}
+    except redis.ConnectionError:
+        return {"status": "Failed to connect to Redis!"}
+
+
